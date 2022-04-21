@@ -1,0 +1,487 @@
+version: 2.1
+
+jobs:
+  install:
+    machine:
+      image: ubuntu-2004:202107-02
+    working_directory: /tmp/workspace/repo
+    steps:
+      - checkout
+      - restore_cache:
+          key: python-requirements-{{ checksum "setup.cfg" }}
+      - run:
+          name: Install prerequisites
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y libsasl2-dev python3.8-venv python3.8-dev
+      - run:
+          name: Setup environment
+          environment:
+            VENV_BIN: "/usr/bin/python3.8 -m venv"
+          command: |
+            make install
+            mkdir -p target/reports
+            mkdir -p target/coverage
+      - save_cache:
+          key: python-requirements-{{ checksum "setup.cfg" }}
+          paths:
+            - "~/.cache/pip"
+      - persist_to_workspace:
+          root:
+            /tmp/workspace
+          paths:
+            - repo
+
+  preflight:
+    docker:
+      - image: buildpack-deps:focal
+    working_directory: /tmp/workspace/repo
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Linting
+          command: make lint
+
+  unit-tests:
+    docker:
+      - image: buildpack-deps:focal
+    working_directory: /tmp/workspace/repo
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Unit tests
+          environment:
+            TEST_PATH: "tests/unit"
+            PYTEST_ARGS: "--junitxml=target/reports/unit-tests.xml -o junit_suite_name=unit-tests"
+            COVERAGE_ARGS: "-p"
+          command: make test-coverage
+      - store_test_results:
+          path: target/reports/
+      - run:
+          name: Store coverage results
+          command: mv .coverage.* target/coverage/
+      - persist_to_workspace:
+          root:
+            /tmp/workspace
+          paths:
+            - repo/target/coverage/
+
+  itest-lambda-docker:
+    machine:
+      image: ubuntu-2004:202107-02
+    working_directory: /tmp/workspace/repo
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Pull Lambda runtimes
+          command: |
+            sudo useradd localstack -s /bin/bash
+            docker pull -q lambci/lambda:20191117-nodejs8.10
+            docker pull -q lambci/lambda:20191117-ruby2.5
+            docker pull -q lambci/lambda:20210129-ruby2.7
+            docker pull -q lambci/lambda:20191117-python3.6
+            docker pull -q lambci/lambda:20191117-dotnetcore2.0
+            docker pull -q lambci/lambda:dotnetcore3.1
+            docker pull -q mlupin/docker-lambda:dotnet6
+            docker pull -q lambci/lambda:20191117-provided
+            docker pull -q lambci/lambda:java8
+            docker pull -q lambci/lambda:python3.8
+      - run:
+          name: Initialize Test Libraries
+          command: make init-testlibs
+      - run:
+          name: Test Docker client
+          environment:
+            DEBUG: 1
+            TEST_PATH: "tests/integration/docker_utils"
+            TEST_SKIP_LOCALSTACK_START: 1
+            PYTEST_ARGS: "--reruns 2 --junitxml=target/reports/docker-client.xml -o junit_suite_name='docker-client'"
+            COVERAGE_ARGS: "-p"
+          command: make test-coverage
+      - run:
+          name: Test 'docker' Lambda executor
+          environment:
+            DEBUG: 1
+            LAMBDA_EXECUTOR: "docker"
+            USE_SSL: 1
+            TEST_ERROR_INJECTION: 1
+            TEST_PATH: "tests/integration/awslambda/ tests/integration/test_integration.py"
+            PYTEST_ARGS: "--reruns 2 --junitxml=target/reports/lambda-docker.xml -o junit_suite_name='lambda-docker'"
+            COVERAGE_ARGS: "-p"
+          command: make test-coverage
+      - run:
+          name: Test 'docker-reuse' Lambda executor
+          environment:
+            DEBUG: 1
+            LAMBDA_EXECUTOR: "docker-reuse"
+            TEST_PATH: "tests/integration/awslambda/ tests/integration/test_integration.py"
+            PYTEST_ARGS: "--reruns 2 --junitxml=target/reports/lambda-docker-reuse.xml -o junit_suite_name='lambda-docker-reuse'"
+            COVERAGE_ARGS: "-p"
+          command: make test-coverage
+      - run:
+          name: Store coverage results
+          command: mv .coverage.* target/coverage/
+      - persist_to_workspace:
+          root:
+            /tmp/workspace
+          paths:
+            - repo/target/coverage/
+      - store_test_results:
+          path: target/reports/
+
+  itest-sqs-provider:
+    machine:
+      image: ubuntu-2004:202107-02
+    working_directory: /tmp/workspace/repo
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Test ElasticMQ SQS provider
+          environment:
+            DEBUG: 1
+            SQS_PROVIDER: "elasticmq"
+            TEST_PATH: "tests/integration/test_sns.py -k test_publish_sqs_from_sns_with_xray_propagation"
+            PYTEST_ARGS: "--reruns 3 --junitxml=target/reports/elasticmq.xml -o junit_suite_name='elasticmq'"
+            COVERAGE_ARGS: "-p"
+          command: make test-coverage
+      - run:
+          name: Test ASF SQS provider
+          environment:
+            DEBUG: 1
+            PROVIDER_OVERRIDE_SQS: "asf"
+            TEST_PATH: "tests/integration/test_sqs.py"
+            PYTEST_ARGS: "--reruns 3 --junitxml=target/reports/sqs_asf.xml -o junit_suite_name='sqs_asf'"
+            COVERAGE_ARGS: "-p"
+          command: make test-coverage
+      - run:
+          name: Store coverage results
+          command: mv .coverage.* target/coverage/
+      - persist_to_workspace:
+          root:
+            /tmp/workspace
+          paths:
+            - repo/target/coverage/
+      - store_test_results:
+          path: target/reports/
+
+  itest-lambda-provider:
+    machine:
+      image: ubuntu-2004:202107-02
+    working_directory: /tmp/workspace/repo
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Test ASF Lambda provider
+          environment:
+            DEBUG: 1
+            PROVIDER_OVERRIDE_LAMBDA: "asf"
+            TEST_PATH: "tests/integration/awslambda/test_lambda_api.py"
+            PYTEST_ARGS: "--reruns 3 --junitxml=target/reports/lambda_asf.xml -o junit_suite_name='lambda_asf'"
+            COVERAGE_ARGS: "-p"
+          command: make test-coverage
+      - run:
+          name: Store coverage results
+          command: mv .coverage.* target/coverage/
+      - persist_to_workspace:
+          root:
+            /tmp/workspace
+          paths:
+            - repo/target/coverage/
+      - store_test_results:
+          path: target/reports/
+
+  itest-bootstrap:
+    machine:
+      image: ubuntu-2004:202107-02
+    working_directory: /tmp/workspace/repo
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Run bootstrap tests
+          environment:
+            DEBUG: 1
+            TEST_PATH: "tests/bootstrap"
+            PYTEST_ARGS: "--junitxml=target/reports/bootstrap.xml -o junit_suite_name='bootstrap'"
+            COVERAGE_ARGS: "-p"
+          command: make test-coverage
+      - run:
+          name: Store coverage results
+          command: mv .coverage.* target/coverage/
+      - persist_to_workspace:
+          root:
+            /tmp/workspace
+          paths:
+            - repo/target/coverage/
+      - store_test_results:
+          path: target/reports/
+
+  docker-build:
+    parameters:
+      platform:
+        description: "Platform to build for"
+        default: "amd64"
+        type: string
+      machine_image:
+        description: "CircleCI machine type to run at"
+        default: "ubuntu-2004:202107-02"
+        type: string
+      resource_class:
+        description: "CircleCI machine type to run at"
+        default: "medium"
+        type: string
+    machine:
+      image: << parameters.machine_image >>
+      docker_layer_caching: true
+    resource_class: << parameters.resource_class >>
+    working_directory: /tmp/workspace/repo
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - when:
+          condition:
+            equal: [ arm64, << parameters.platform >> ]
+          steps:
+            - run:
+                # Since we are using an old version of ubuntu, we need to install the latest version of docker
+                name: Update docker engine to most current
+                command: |
+                  # Remove old version
+                  sudo apt-get remove --purge docker docker-engine docker.io containerd runc -y
+                  # Install Docker deb package repo
+                  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+                    sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+                  echo "deb [arch=arm64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+                    | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+                  sudo apt-get update
+                  # Install the latest version of Docker and haveged
+                  # (https://github.com/docker/compose/issues/6678#issuecomment-526831488)
+                  sudo apt-get install docker-ce docker-ce-cli containerd.io haveged -y
+                  sudo usermod -aG docker $USER
+      - run:
+          name: Build full docker image
+          command: make docker-build
+      - run:
+          name: Save full docker image
+          command: PLATFORM="<< parameters.platform >>" make docker-save-image
+      - when:
+          condition:
+            equal: [ master, << pipeline.git.branch >> ]
+          steps:
+            - run:
+                name: Build light docker image
+                command: make docker-build-light
+            - run:
+                name: Run pre-release smoke tests
+                command: make ci-pro-smoke-tests
+            - run:
+                name: Save light docker image
+                command: PLATFORM="<< parameters.platform >>" make docker-save-image-light
+      - persist_to_workspace:
+          root:
+            /tmp/workspace
+          paths:
+            - repo/target/
+
+  docker-test:
+    parameters:
+      platform:
+        description: "Platform to build for"
+        default: "amd64"
+        type: string
+      resource_class:
+        description: "CircleCI machine type to run at"
+        default: "medium"
+        type: string
+      machine_image:
+        description: "CircleCI machine type to run at"
+        default: "ubuntu-2004:202107-02"
+        type: string
+    machine:
+      image: << parameters.machine_image >>
+    resource_class: << parameters.resource_class >>
+    working_directory: /tmp/workspace/repo
+    parallelism: 2
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Load docker localstack-full image
+          command: docker load -i target/localstack-docker-image-<< parameters.platform >>.tar
+      - run:
+          name: Run integration tests
+          # circleci split returns newline separated list, so `tr` is necessary to prevent problems in the Makefile
+          command: |
+            TEST_FILES=$(circleci tests glob "tests/integration/**/test_*.py" | circleci tests split --split-by=timings | tr '\n' ' ')
+            PYTEST_ARGS="-o junit_family=legacy --junitxml=target/reports/test-report-<< parameters.platform >>-${CIRCLE_NODE_INDEX}.xml" \
+            COVERAGE_FILE="target/coverage/.coverage.<< parameters.platform >>.${CIRCLE_NODE_INDEX}" \
+            TEST_PATH=$TEST_FILES \
+            make docker-run-tests
+      - store_test_results:
+          path: target/reports/
+      - persist_to_workspace:
+          root:
+            /tmp/workspace
+          paths:
+            - repo/target/reports/
+            - repo/target/coverage/
+
+  report:
+    docker:
+      - image: buildpack-deps:focal
+    working_directory: /tmp/workspace/repo
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Collect coverage
+          command: |
+            source .venv/bin/activate
+            cd target/coverage
+            ls -la
+            coverage combine
+            mv .coverage ../../
+      - run:
+          name: Report coverage statistics
+          command: |
+            source .venv/bin/activate
+            coverage report || true
+            coverage html || true
+            coveralls || true
+      - store_artifacts:
+          path: htmlcov/
+
+  docker-push:
+    machine:
+      image: ubuntu-2004:202107-02
+    working_directory: /tmp/workspace/repo
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Load docker image - amd64/full
+          command: |
+            # Load localstack/localstack-full:latest for AMD64
+            docker load -i target/localstack-docker-image-amd64.tar
+      - run:
+          name: Load docker image - amd64/light
+          command: |
+            # Load localstack/localstack-light:latest
+            docker load -i target/localstack-docker-image-light-amd64.tar
+      - run:
+          name: Log in to ECR registry
+          command: aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
+      - run:
+          name: Push docker images - amd64
+          command: |
+            # Push to Docker Hub
+            PLATFORM="amd64" make docker-push-master-all
+            # Push to Amazon Public ECR
+            PLATFORM="amd64" SOURCE_IMAGE_NAME="localstack/localstack-light" TARGET_IMAGE_NAME="public.ecr.aws/localstack/localstack" make docker-push-master
+      # Load and push per architecture (load overwrites the previous ones)
+      - run:
+          name: Load docker image - arm64/full
+          command: |
+            # Load localstack/localstack-full:latest for ARM64
+            docker load -i target/localstack-docker-image-arm64.tar
+      - run:
+          name: Load docker image - arm64/light
+          command: docker load -i target/localstack-docker-image-light-arm64.tar
+      - run:
+          name: Push docker images - arm64
+          command: |
+            # Push to Docker Hub
+            PLATFORM="arm64" make docker-push-master-all
+            # Push to Amazon Public ECR
+            PLATFORM="arm64" SOURCE_IMAGE_NAME="localstack/localstack-light" TARGET_IMAGE_NAME="public.ecr.aws/localstack/localstack" make docker-push-master
+      - run:
+          name: Create multi-platform manifests - full
+          command: |
+            # Push to Docker Hub
+            make docker-create-push-manifests
+      - run:
+          name: Create multi-platform manifests - light
+          command: |
+            # Push to Docker Hub
+            make docker-create-push-manifests-light
+            # Push to Amazon Public ECR
+            MANIFEST_IMAGE_NAME="public.ecr.aws/localstack/localstack" make docker-create-push-manifests
+
+workflows:
+  main:
+    jobs:
+      - install
+      - preflight:
+          requires:
+            - install
+      - itest-lambda-docker:
+          requires:
+            - preflight
+      - itest-sqs-provider:
+          requires:
+            - preflight
+      - itest-lambda-provider:
+          requires:
+            - preflight
+      - itest-bootstrap:
+          requires:
+            - preflight
+      - unit-tests:
+          requires:
+            - preflight
+      - docker-build:
+          name: docker-build-amd64
+          platform: amd64
+          machine_image: ubuntu-2004:202107-02
+          resource_class: medium
+          requires:
+            - preflight
+      - docker-build:
+          name: docker-build-arm64
+          platform: arm64
+          # The latest version of ubuntu is not yet supported for ARM:
+          # https://circleci.com/docs/2.0/arm-resources/
+          machine_image: ubuntu-2004:202101-01
+          resource_class: arm.medium
+          requires:
+            - preflight
+      - docker-test:
+          name: docker-test-arm64
+          platform: arm64
+          resource_class: arm.medium
+          machine_image: ubuntu-2004:202101-01
+          requires:
+            - docker-build-arm64
+      - docker-test:
+          name: docker-test-amd64
+          platform: amd64
+          resource_class: medium
+          machine_image: ubuntu-2004:202107-02
+          requires:
+            - docker-build-amd64
+      - report:
+          requires:
+            - itest-lambda-docker
+            - itest-sqs-provider
+            - itest-lambda-provider
+            - itest-bootstrap
+            - docker-test-amd64
+            - docker-test-arm64
+            - unit-tests
+      - docker-push:
+          filters:
+            branches:
+              only: master
+          requires:
+            - itest-lambda-docker
+            - itest-sqs-provider
+            - itest-lambda-provider
+            - itest-bootstrap
+            - docker-test-amd64
+            - docker-test-arm64
+            - unit-tests
