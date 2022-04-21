@@ -32,16 +32,6 @@ jobs:
           paths:
             - repo
 
-  preflight:
-    docker:
-      - image: buildpack-deps:focal
-    working_directory: /tmp/workspace/repo
-    steps:
-      - attach_workspace:
-          at: /tmp/workspace
-      - run:
-          name: Linting
-          command: make lint
 
   unit-tests:
     docker:
